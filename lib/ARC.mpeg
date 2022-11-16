@@ -1,0 +1,205 @@
+# This is the NIST ARC AMPL Model
+# Binary functioning components
+# SETS
+set P     'Product <P>';
+set I     'Component <I>';
+set LNK   'Link <I.beg,I.end,P>'              within {I,I,P};
+set IX    'Input connection <I,P>'            within {I,P};
+set OX    'Output connection <I,P>'           within {I,P};
+set PRC   'Processes <I,P.out,P.in>' = setof {(i,p) in IX, (i,pdot) in OX} (i,pdot,p);
+
+set DLNK  'Protections <I.parent,I.child>'    within {I,I};  # Parent,child
+set DCHLD 'Protected components <I>' = setof {(i,iota) in DLNK} iota;
+
+set E     'Events <E>'; 
+
+# PARAMETERS (DATA)
+param PR           'Probability [-]'                                         {e in E};          
+param R0           'Initial resistance [ft]'                                 {i in I};
+param R_OVERBRACE  'Resistance change upper bound [ft]'                      {i in I};
+param CVARR        'Variable cost of increasing resistance [$/ft]'           {i in I};
+param CFIXE        'Fixed cost of employing new system components [$]'       {i in I};
+param CFIXD        'Cost of repairing/replacing damaged components [$]'      {i in I};   
+param CFIXST       'Cost of starting up [$]'                                 {i in I};   
+param D            'Duration [days] of repair of system component'           {i in I};   
+param D_DOT        'Duration [days] startup time'                            {i in I};   
+param Y0           'Pre-event use [in use = 1, not in use=0]'                {i in I}; 
+
+param S0           'Backup storage capacity [days] for input type'    {(i,p) in IX}; 
+param S_OVERBRACE  'Upper bound on backup storage increase [days]'    {(i,p) in IX}; 
+param CVARS        'Variable cost for adding storage [$/day]'         {(i,p) in IX}; 
+param Q_GRAVE      'Source [unit product]'               {(i,p) in IX}; 
+param Q_ACUTE      'Sink [unit product]'                 {(i,p) in OX};
+param Q_STAR       'Sink maximum [unit product]'         {(i,p) in OX}; 
+param A            'Input requirement [units IN/unit OUT]'    {(i,pout,pin) in PRC}; 
+
+param L            'Loading to component [ft]' {i in I, e in E};   
+
+param Q_OVERBRACE 'Max flow [unit product]'  {(i_arc,i,p) in LNK};      
+param CVARQ       'Cost per unit flow [$/unit product]' {(i_arc,i,p) in LNK};      
+
+#auxiliary constants
+param M          '"Big M" [-]' default 10000;   
+param restor_end 'Recovery endpoint [-]' symbolic in I;
+
+# MGA parameters
+param mga_coeff_r   'Increase in resistance MGA coefficient [ft]'       {i in I}       default 0;   
+param mga_coeff_s   'Increase in backup storage MGA coefficient [days]' {(i,p) in IX}  default 0;
+
+# 1st stage variables
+var r     'Increase in resistance [ft]'     {i in I}  >=0, <=R_OVERBRACE[i];   
+var r_bar 'Resistance with lines of defense [ft]'             {i in I}; 
+var s     'Increase in backup storage [days]' {(i,p) in IX}    >=0, <=S_OVERBRACE[i,p]; 
+
+var z 'Protection status [self-protected=1 , parent-protected=0]'      {i in DCHLD} binary; 
+
+# 2nd stage variables
+var q       'Flow on link [unit product]' {(i_arc,i,p) in LNK,e in E}    >=0,     <=Q_OVERBRACE[i_arc,i,p];  # Flow on a link
+var q_grave 'Node source [unit product]' {(i,p)in IX,e in E}    >=0,              <=Q_GRAVE[i,p];            # Supply to a node
+var q_acute 'Node sink [unit product]' {(i,p)in OX,e in E}    >=Q_ACUTE[i,p],     <=Q_STAR [i,p];            # Demand from a node
+
+var y         'Node criticality [critical=1 , non-critical=0]'     {i in I, e in E}       binary; # Indicates critical node, ie, used in meeting of minimum demands
+var y_hat     'Node integrity [damaged=0, undamaged=1]'     {i in I, e in E}              binary; # Indicates post-event integrity
+var y_plus    'New use of node [unused=0, new-used=1]'      {i in I,e in E}               binary; # Increase in node use (e.p., sandbags from 0 to 1 if used); used to apply startup duration/costs
+var y_tilde   'Online prior to and througout [offline=0, online=1]'     {i in I,e in E}   binary; # Indicator if online pre- and post-event remained online
+var y_breve   'Sufficiency of backup [insufficient=0, sufficient=1]'    {(i,p) in IX, e in E}          binary; # Backup storage is sufficient (1); breve to resemble cistern holding water
+var y_arc     'Link criticality [critical=1 , non-critical=0]'     {(i_arc,i,p) in LNK, e in E}  binary; # Indicates critical link, ie, used in meeting minimum demands
+
+var d      'Realized duration [days]' {i in I, e in E}       >=0;         
+var d_dot  'Realized duration startup [days]' {i in I, e in E}       >=0;         
+var t      'Time until restoration of function [days]' {i in I, e in E}       >=0;         
+var t_arc  'Time until restoration of inputs [days]'   {(i,p) in IX, e in E}  >=0; 
+
+#defined variables -- needed to support display
+var r_prime     'New resistance [ft]'              {i in I}        = R0[i]+r[i];
+var s_prime     'New storage [unit product]'       {(i,p) in IX}   = S0[i,p]+s[i,p];
+
+var StorageCostByNodeByProduct     'Cost of increasing storage of a product [$]'    {(i,p) in IX}           = CVARS[i,p]* s[i,p];
+
+var node_in     'Incoming flow [unit product]'    {(i,p) in IX, e in E}   = q_grave[i,p,e] + sum{(i_arc,i,p) in LNK} q[i_arc,i,p,e];
+var node_out    'Outgoing flow [unit product]'    {(i,p) in IX, e in E}   = sum{(i,pdot) in OX} (A[i,pdot,p]*(q_acute[i,pdot,e] + sum{(i,i_arc,pdot) in LNK} q[i,i_arc,pdot,e]));
+
+var ResistanceCostByNode  'Cost of increasing resistance [$]'              {i in I}                = CVARR[i]* r[i];
+var StorageCostByNode     'Cost of increasing storage [$]'                 {i in I}                = sum {(i,p) in IX} StorageCostByNodeByProduct[i,p];
+var MitigationCostByNode  'Mitigation cost [$]'                            {i in I}                = ResistanceCostByNode[i] + StorageCostByNode[i];
+
+var ResistanceCost      'System-wide cost of increasing resistance [$]'     = sum {i in I}  ResistanceCostByNode[i];
+var StorageCost         'System-wide cost of increasing storage [$]'        = sum {i in I}  StorageCostByNode[i];
+var MitigationCost      'System-wide mitigation cost [$]'                   = ResistanceCost + StorageCost;
+
+var NodeUseCostByNodeByEvent       'Event cost: employing new node [$]'      {i in I, e in E}  = CFIXE[i]  * y_plus[i,e];
+var NodeDamageCostByNodeByEvent    'Event cost: node damage [$]'             {i in I, e in E}  = CFIXD[i]  * (1-y_hat[i,e]);
+var NodeStartupCostByNodeByEvent   'Event cost: node startup [$]'            {i in I, e in E}  = CFIXST[i] * (1-y_tilde[i,e]);
+var NodeCostByNodeByEvent     'Total event costs: node [$]'                  {i in I, e in E}  =  NodeUseCostByNodeByEvent[i,e] 
+                                                                                            + NodeDamageCostByNodeByEvent[i,e]
+                                                                                            + NodeStartupCostByNodeByEvent[i,e];
+var NodeCostByEvent  'Sum total event costs: nodes [$]'    {e in E}  = sum{i in I} NodeCostByNodeByEvent[i,e];
+
+var LinkCostByLinkByEvent          'Costs: link [$]'        {(i_arc,i,p) in LNK, e in E} = CVARQ[i_arc,i,p] * q[i_arc,i,p,e];
+var LinkCostByEvent  'Sum total event costs: links [$]' {e in E}           = sum{(i_arc,i,p) in LNK} LinkCostByLinkByEvent[i_arc,i,p,e];
+
+var CostsByEvent      'Sum total of event costs [$]'     {e in E}           = NodeCostByEvent[e] + LinkCostByEvent[e];
+var EV_CostContributionsByEvent 'Expected value of event costs by event [$]' {e in E} = PR[e] * CostsByEvent[e]; 
+var EV_EventCosts 'Expected value of event costs [$]'           = sum{e in E} EV_CostContributionsByEvent[e];
+
+var EV_TotalCost 'Expected value of Mitigation and Event costs [$]' = MitigationCost + EV_EventCosts;
+
+#var RecoveryDisutility 'Expected value-based recovery time measure [equivalent days]' = sum {e in E} PR[e]*t[restor_end,e];
+var RecoveryDisutility 'Expected value-based recovery time measure [equivalent days]' = sum {e in E} t[restor_end,e];
+
+var MGA 'MGA variable' = sum {i in I} r[i]*mga_coeff_r[i] + sum {(i,p) in IX} s[i,p]*mga_coeff_s[i,p]; 
+
+#D constraints
+ResistanceUnprotected {i in I: i not in DCHLD}:
+	r_bar[i] = r_prime[i];
+
+ResistanceSelfCap {i in DCHLD}:  
+	r_bar[i] <= r_prime[i] + M*(1-z[i]);
+
+ResistanceParentCap {(i,iota) in DLNK}:  
+	r_bar[iota] <= r_bar[i] + M*(z[iota]);
+
+PostEventIntegrity {i in I,e in E}: 
+	r_bar[i] >= L[i,e] - M*(1-y_hat[i,e]); 
+    
+DurationFloor{i in I, e in E}:
+	d[i,e]>= D[i] - M*y_hat[i,e];
+
+#Flow constraints
+LinkCriticality{(i_arc,i,p) in LNK, e in E}:
+	q[i_arc,i,p,e] <= M*y_arc[i_arc,i,p,e];
+
+NodeCriticality1{(i,i_arcleft,p) in LNK, e in E}:
+	y[i,e] >= y_arc[i,i_arcleft,p,e];
+
+NodeCriticality2{(i,p) in OX, e in E}:
+	M*y[i,e] >= q_acute[i,p,e];
+
+# Needed for new system components post-event
+DefineY_plus  {i in I, e in E}:  
+	y_plus[i,e]>=y[i,e]-Y0[i];
+
+## Variety of conditions indicate ""online before event and maintained""
+# Use of new system component
+YOnlineCeiling1{i in I, e in E}:        
+	y_tilde[i,e] <= (1-y_plus[i,e]);
+# Loss of integrity
+YOnlineCeiling2{i in I, e in E}:
+	y_tilde[i,e] <= y_hat[i,e];
+# Insufficient storage
+YOnlineCeiling3{(i,p) in IX, e in E}:
+	y_tilde[i,e] <= y_breve[i,p,e];
+
+DurationFloorStartup{i in I, e in E}:  
+	d_dot[i,e]>= D_DOT[i] - M*y_tilde [i,e];
+
+SupplyChoke {(i,p) in IX, e in E}:
+	q_grave[i,p,e]  <= M*y[i,e];
+
+#DemandFloor {(i,p) in OX, e in E}:
+#	q_acute[i,p,e]  >= Q_ACUTE[i,p];
+
+SufficientSupply {(i,p) in IX, e in E}:
+	node_in [i,p,e] >= node_out [i,p,e];
+
+InputRestorationTimeFloor {(i_arc,i,p) in LNK,e in E}:     
+	t_arc[i,p,e] >= t[i_arc,e] - M*(1-y_arc[i_arc,i,p,e]);
+
+#Disjunctive constraints for y_breve
+DefineY_breve{(i,p) in IX,e in E}:   #what about duration of i?    gw never went down
+	s_prime[i,p] +M*(1-y_breve[i,p,e]) >= t_arc[i,p,e];
+TimeFloorInputs{(i,p)  in IX,e in E}:
+	t[i,e] + M*y_breve[i,p,e] >= t_arc[i,p,e] + d_dot[i,e];
+TimeFloorDamage{i  in I,e in E}:
+	t[i,e] >= d[i,e] + d_dot[i,e]; 
+    
+###   ALLOWS FOR INVENTORY OF PARTS AS PT OF SOLUTION.  WHERE TO PUT TIME?  NODES?  LINKS? BOTH?  WHAT TO CALL IT?
+
+################ ADD STARTUP COSTS,THE REAL PURPOSE FOR YMINUS PLUS;  ADD T > 0 BINARY...THAT DICTATES STARTUP COSTS  YBREVE
+
+# Following objectives to deal with alternate optima; optimal solution should be fixed when optimizing
+# these objectives and then unfixed
+minimize AltOpt_EV_TotalCost:       EV_TotalCost;
+maximize AltOpt_Protection:         sum {i in I} r_bar[i];  # some disjunctive constraints 
+minimize AltOpt_RecoveryTimeSum:    sum {i in I, e in E}  t[i,e];  # assume earlier is better for all intermediate nodes
+minimize AltOpt_Y:                  sum {i in I, e in E}  y[i,e];  # if choice, use in solution to meet minimal demands (more is better)
+minimize AltOpt_Y_ARC:              sum {(iarc,i,p) in LNK, e in E}  y_arc[iarc,i,p,e];
+maximize AltOpt_Y_TILDE:            sum {i in I, e in E}               y_tilde[i,e];
+maximize AltOpt_Z:                  sum {i in DCHLD} z[i];
+minimize AltOpt_Q:                  sum {(iarc,i,p) in LNK, e in E}  q[iarc,i,p,e];
+maximize AltOpt_Q_ACUTE:            sum {(i,p)in OX, e in E} q_acute[i,p,e];   # maximize realized demand (up to limits on demand)
+maximize AltOpt_Y_BREVE:            sum {(i,p) in IX, e in E} y_breve[i,p,e];  # maximize sufficiency of backup 
+
+# Following is solely to support display
+param LAT     'Latitude'     {i in I};
+param LONG    'Longitude'    {i in I}; 
+param YEAR    'Year'         {i in I};
+param OUTPUT  'Output'       {i in I}; 
+
+param I_name 'Component name' {I} symbolic;
+param P_name 'Product name'   {P} symbolic;
+
+param I_gisType    'GIS type for component'     {I} symbolic;
+param I_gisValue   'GIS value for component'    {I} symbolic;
+param I_imageType  'Image type for component'   {I} symbolic;
+param I_imageValue 'Image value for component'  {I} symbolic;
